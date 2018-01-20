@@ -1,0 +1,744 @@
+{
+	"auto_complete":
+	{
+		"selected_items":
+		[
+			[
+				"alarms",
+				"alarmsEnabled\tbool "
+			],
+			[
+				"fun",
+				"function\t? "
+			],
+			[
+				"is",
+				"isConnected\tbool "
+			],
+			[
+				"fu",
+				"function\t? "
+			],
+			[
+				"ba",
+				"basicAuthPassword"
+			],
+			[
+				"basic",
+				"basicAuthUser"
+			],
+			[
+				"lf",
+				"lf-ref-image"
+			],
+			[
+				"g",
+				"gutil"
+			]
+		]
+	},
+	"buffers":
+	[
+		{
+			"contents": "// Implementation of the interface described in term_io.h.\n\n#include <stdio.h>\n\n#include \"term_io.h\"\n#include \"uart.h\"\n\nstatic int\nterm_io_putchar (char ch, FILE *stream)\n{\n  // Wierd routine.  Satisfies avrlibc's requirements for a stream\n  // implementation function.  This routine first substitutes any given\n  // newline with a carriage return (i.e changes '\\n' to '\\r') then puts\n  // the resulting character out on the serial port using UART_PUT_BYTE().\n\n  if ( ch == '\\n' ) {\n    // I think we could just be putting this byte out directly (our stream\n    // in this case is tied inevitably to the serial port).\n    term_io_putchar ('\\r', stream);\n  }\n\n  UART_PUT_BYTE (ch);\n\n  // Because this interface is mainly intended for debugging and it's not\n  // nice to return before things we output are truly sent (in case some\n  // subsequent code (e.g. sleep) stops the UART hardware (e.g. sleep),\n  // we wait for the transmitted byte to be completely sent before returning.\n  UART_WAIT_FOR_TRANSMIT_COMPLETE ();\n\n  return 0;\n}\n\nstatic int\nterm_io_getchar (FILE *stream)\n{\n  // Wierdo routine.  Satisfies avrlibc's requirements for a stream\n  // implementation function.  It's actually line buffered, might propagate\n  // errors upwards when trying to receive bytes from the serial port,\n  // and might term_io_putchar() bytes in response to the byte it reads.\n  // It's doing all this crazy stuff in order to help us get somewhat\n  // terminal-like command line editing.  In more detail:\n  //\n  // This features a simple line-editor that allows to delete and re-edit\n  // the characters entered, until either CR or NL is entered.  Printable\n  // characters entered will be echoed using uart_putchar().\n  //\n  // Editing characters:\n  //\n  //   \\b (BS) or \\177 (DEL)    delete the previous character\n  //   ^u                       kills the entire input buffer\n  //   ^w                       deletes the previous word\n  //   ^r                       sends a CR, and then reprints the buffer\n  //   \\t                       will be replaced by a single space\n  //\n  // All other control characters will be ignored.\n  //\n  // The internal line buffer is TERM_IO_RX_BUFSIZE characters long, which\n  // includes the terminating \\n (but no terminating \\0).  If the buffer\n  // is full (i. e., at TERM_IO_RX_BUFSIZE - 1 characters in order to keep\n  // space for the trailing \\n), any further input attempts will send a \\a to\n  // uart_putchar() (BEL character), although line editing is still allowed.\n  //\n  // Input errors while talking to the UART will cause an immediate return of\n  // -1 (error indication).  Notably, this will be caused by a framing error\n  // (e. g.  serial line \"break\" condition), by an input overrun, and by a\n  // parity error (if parity was enabled and automatic parity recognition\n  // is supported by hardware).\n  //\n  // Successive calls to uart_getchar() will be satisfied from the internal\n  // buffer until that buffer is emptied again.\n\n  uint8_t ch;\n  char *cp, *cp2;\n  static char buf[TERM_IO_RX_BUFSIZE];\n  static char *rxp;\n\n  if ( rxp == 0 ) {\n    for ( cp = buf ; ; ) {\n      UART_WAIT_FOR_BYTE ();\n      if ( UART_RX_FRAME_ERROR () ) {\n        return _FDEV_EOF;\n      }\n      if ( UART_RX_DATA_OVERRUN_ERROR () ) {\n        return _FDEV_ERR;\n      }\n      ch = UART_GET_BYTE ();\n\n      // Behaviour similar to Unix stty ICRNL.\n      if ( ch == '\\r' ) {\n        ch = '\\n';\n      }\n      if ( ch == '\\n' ) {\n        *cp = ch;\n        term_io_putchar (ch, stream);\n        rxp = buf;\n        break;\n      }\n      else if ( ch == '\\t' ) {\n        ch = ' ';\n      }\n\n      if ( (ch >= (uint8_t)' ' && ch <= (uint8_t)'\\x7e') ||\n           ch >= (uint8_t)'\\xa0') {\n        if ( cp == buf + TERM_IO_RX_BUFSIZE - 1 ) {\n          term_io_putchar ('\\a', stream);\n        }\n        else {\n          *cp++ = ch;\n          term_io_putchar (ch, stream);\n        }\n        continue;\n      }\n\n      switch ( ch ) {\n        case 'c' & 0x1f:\n          return -1;\n\n        // FIXXME: it would be nice to say a few words about these magic\n        // values (e.g. '\\x7f').\n\n        case '\\b':\n        case '\\x7f':\n          if (cp > buf) {\n            term_io_putchar ('\\b', stream);\n            term_io_putchar (' ', stream);\n            term_io_putchar ('\\b', stream);\n            cp--;\n          }\n          break;\n\n        case 'r' & 0x1f:\n          term_io_putchar ('\\r', stream);\n          for ( cp2 = buf; cp2 < cp; cp2++ ) {\n            term_io_putchar ( *cp2, stream);\n          }\n          break;\n\n        case 'u' & 0x1f:\n          while (cp > buf) {\n            term_io_putchar ('\\b', stream);\n            term_io_putchar (' ', stream);\n            term_io_putchar ('\\b', stream);\n            cp--;\n          }\n          break;\n\n        case 'w' & 0x1f:\n          while (cp > buf && cp[-1] != ' ') {\n            term_io_putchar ('\\b', stream);\n            term_io_putchar (' ', stream);\n            term_io_putchar ('\\b', stream);\n            cp--;\n          }\n          break;\n      }\n    }\n  }\n\n  ch = *rxp++;\n\n  if ( ch == '\\n' ) {\n    rxp = 0;\n  }\n\n  return ch;\n}\n\nstatic FILE term_io_str\n  = FDEV_SETUP_STREAM (term_io_putchar, term_io_getchar, _FDEV_SETUP_RW);\n\nvoid\nterm_io_init (void)\n{\n  uart_init ();\n\n  stdout = stdin = &term_io_str;\n}\n\nint\nterm_io_getline (char *linebuf)\n{\n  char *lbp = linebuf;\n\n  size_t char_count = 0;\n\n  for ( ; ; ) {\n\n    int ch = term_io_getchar (stdin);\n\n    switch ( ch ) {\n      case -1:\n        return -1;\n        break;\n      case _FDEV_EOF:\n        // FIXME: is there something intelligent we should do here?\n      case '\\n':\n        // FIXME: we should do something intelligent when we're about to\n        // overflow the buffer.  For now we just return -1, maybe we should\n        // stuff an error message in the returned string?\n        *lbp = ch;\n        lbp++;\n        char_count++;\n        if ( char_count == TERM_IO_LINE_BUFFER_MIN_SIZE ) {\n          return -1;\n        }\n        *lbp = '\\0';\n        return char_count;\n        break;\n      default:\n        *lbp = ch;\n        lbp++;\n        char_count++;\n        // FIXME: see other fixme\n        if ( char_count == TERM_IO_LINE_BUFFER_MIN_SIZE ) {\n          return -1;\n        }\n        break;\n    }\n  }\n}\n",
+			"file": "term_io.c",
+			"file_size": 6242,
+			"file_write_time": 131191461270000000,
+			"settings":
+			{
+				"buffer_size": 6241,
+				"line_ending": "Unix"
+			}
+		},
+		{
+			"file": "lock_and_fuse_bits_to_avrdude_options.perl",
+			"settings":
+			{
+				"buffer_size": 10724,
+				"line_ending": "Unix"
+			}
+		}
+	],
+	"build_system": "",
+	"build_system_choices":
+	[
+	],
+	"build_varint": "",
+	"command_palette":
+	{
+		"height": 392.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"Package Control: ",
+				"Package Control: Install Package"
+			],
+			[
+				"Package Control: Lis",
+				"Package Control: List Packages"
+			],
+			[
+				"Package Control: Ins",
+				"Package Control: Install Package"
+			]
+		],
+		"width": 412.0
+	},
+	"console":
+	{
+		"height": 126.0,
+		"history":
+		[
+			"import urllib.request,os,hashlib; h = 'df21e130d211cfc94d9b0905775a7c0f' + '1e3d39e33b79698005270310898eea76'; pf = 'Package Control.sublime-package'; ipp = sublime.installed_packages_path(); urllib.request.install_opener( urllib.request.build_opener( urllib.request.ProxyHandler()) ); by = urllib.request.urlopen( 'http://packagecontrol.io/' + pf.replace(' ', '%20')).read(); dh = hashlib.sha256(by).hexdigest(); print('Error validating download (got %s instead of %s), please try manual install' % (dh, h)) if dh != h else open(os.path.join( ipp, pf), 'wb' ).write(by)"
+		]
+	},
+	"distraction_free":
+	{
+		"menu_visible": true,
+		"show_minimap": false,
+		"show_open_files": false,
+		"show_tabs": false,
+		"side_bar_visible": false,
+		"status_bar_visible": false
+	},
+	"expanded_folders":
+	[
+		"/C/Development/Laboratory/Arduino/c-samples/motor"
+	],
+	"file_history":
+	[
+		"/C/Development/Laboratory/Arduino/c-samples/cduino-2.0.0/adc/cscope.in.out",
+		"/C/Development/Laboratory/Android/android-design-library-master/6-PageElement/src/main/java/com.example.android.materialdesigncodelab/MainActivity.java",
+		"/C/Development/Laboratory/Android/android-design-library-master/2-Color/src/main/java/com.example.android.materialdesigncodelab/MainActivity.java",
+		"/C/Development/Laboratory/Android/android-design-library-master/4-RecyclerView/src/main/AndroidManifest.xml",
+		"/C/Development/Laboratory/Android/android-design-library-master/3-Layout/src/main/java/com.example.android.materialdesigncodelab/ListContentFragment.java",
+		"/C/Development/Gorenje/git/ConnectlifeMobileApp/bower.json",
+		"/C/Development/Gorenje/git/ConnectlifeMobileApp/package.json",
+		"/C/Development/Gorenje/git/ConnectlifeMobileApp/README.md",
+		"/C/Users/A407826/Documents/Proposals/Plataforma/Perfil Usuario/Perfil de usuario consulta.md",
+		"/C/Development/Gorenje/jenkins/devel/debug/index.html",
+		"/C/Users/A407826/Desktop/mqtt_samples_messages.md",
+		"/C/Development/Gorenje/git/gorenje/package.json",
+		"/C/Development/Gorenje/git/gorenje/bower.json",
+		"/C/Development/Gorenje/git/gorenje/config.xml",
+		"/C/Users/A407826/Desktop/TODO_Gorenje_Bitacora.md",
+		"/C/Development/Gorenje/git/gorenje/config/ionic/build.json",
+		"/C/Development/Gorenje/git/gorenje/www/app/components/login-oauth/login-oauth.component.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/appliances/pairing/appliance-pairing.controller.js",
+		"/C/Development/Gorenje/git/gorenje/platforms/android/AndroidManifest.xml",
+		"/C/Users/A407826/Documents/My Projects/Gorenje/SoD/push-notifications/Test_Push_Android.md",
+		"/C/Users/A407826/.m2/settings.xml",
+		"/C/Windows/System32/drivers/etc/hosts",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/services/app.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/components/login-oauth/login-oauth.html",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/api/gj-user.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/communication-MQTT/chp.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/communication/oven.communication.clp.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/stores/user.store.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/services/user.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/security/security.service.js",
+		"/C/Development/Gorenje/git/gorenje/platforms/android/assets/www/app/components/login-oauth/login-oauth.component.js",
+		"/C/Development/Gorenje/git/gorenje/.eslintrc",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/services/navigation-bar.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/app.component.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/components/alarm-item/alarm-item.component.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/lib/stores-helper.js",
+		"/C/Development/Gorenje/git/gorenje/platforms/android/assets/www/app/resources/communication-MQTT/mqtt.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/services/push-notifications.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/components/appliance-adjust-parameters/appliance-adjust-parameters.component.js",
+		"/C/Development/Gorenje/samples/directive_example.js",
+		"/C/Development/Gorenje/SECURITY_REPORT.md",
+		"/C/Users/A407826/Desktop/TODO_Gorenje_Sprint_11_24.md",
+		"/C/Development/Gorenje/JIRA_IFA_ISSUES.md",
+		"/C/Users/A407826/Desktop/particionado/seding/4_remaneTable.sql",
+		"/C/Development/Plataforma/git/t21_pushsms_smpp_connector/smppnx-smsc-utils/pom.xml",
+		"/C/Development/Plataforma/git/t21_pushsms_smpp_connector/smppnx-smsc-client/pom.xml",
+		"/C/Development/Plataforma/git/t21_pushsms_smpp_connector/smppnx-smsc/pom.xml",
+		"/C/Users/A407826/Documents/My Projects/Gorenje/incidences/SMPP_CARACTER_EURO.md",
+		"/C/Users/A407826/Desktop/com/tempos21/smppserver/SMSCSession.java",
+		"/C/Users/A407826/Desktop/Gorenje_Issues_current_sprint.md",
+		"/C/Development/Gorenje/git/gorenje/www/app/properties-dev.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/layouts/layout.controller.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/properties.js",
+		"/C/Development/Gorenje/git/gorenje/node_modules/bower/lib/config.js",
+		"/C/Development/Plataforma/laboratory/SMPP/smppnx-interface/smpp-client/src/main/java/org/smpp/client/SMPPSender.java",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/washing-dishes/washing-dishes.controller.js",
+		"/C/Development/Socialcare/git/worldline_social-care_mobile_hybrid/config.xml",
+		"/C/Development/Gorenje/PLUGIN_ERRORS.md",
+		"/C/Development/Gorenje/README_CODE_HELP.md",
+		"/C/Development/Gorenje/INSTALL_PROCESS.md",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/washing-dishes/washing-dishes.html",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/storing-food/storing-food-tablet.html",
+		"/C/Users/A407826/AppData/Local/Temp/Rar$DIa0.716/SpringActiveMQTest.java",
+		"/C/Development/Plataforma/server/connector-conf/SMPP/logger.properties",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/api/gj-refrigerator-wizard.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/api/gj-refrigerator-wizard-parser.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/api/gj-dishwasher-wizard-parser.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/services/object.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/resources/communication/clp-messages.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/storing-food/storing-food.controller.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/app.module.js",
+		"/C/Development/Gorenje/git/gorenje/www/index.html",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/washing-dishes/washing-dishes.service.js",
+		"/C/Development/Gorenje/git/gorenje/www/app/modules/wizards/storing-food/storing-food-phone.html",
+		"/C/Development/Gorenje/git/gorenje/www/app/lib/angular-img-http-src.js",
+		"/C/Users/A407826/AppData/Local/Temp/VsProjectFault_3f976d0e-4dbb-4640-8e0f-5fdda06d4d47.failure.txt"
+	],
+	"find":
+	{
+		"height": 23.0
+	},
+	"find_in_files":
+	{
+		"height": 104.0,
+		"where_history":
+		[
+		]
+	},
+	"find_state":
+	{
+		"case_sensitive": false,
+		"find_history":
+		[
+			"uart_init"
+		],
+		"highlight": true,
+		"in_selection": false,
+		"preserve_case": false,
+		"regex": false,
+		"replace_history":
+		[
+		],
+		"reverse": false,
+		"show_context": true,
+		"use_buffer2": true,
+		"whole_word": false,
+		"wrap": true
+	},
+	"groups":
+	[
+		{
+			"selected": 1,
+			"sheets":
+			[
+				{
+					"buffer": 0,
+					"file": "term_io.c",
+					"semi_transient": false,
+					"settings":
+					{
+						"buffer_size": 6241,
+						"regions":
+						{
+						},
+						"selection":
+						[
+							[
+								5230,
+								5239
+							]
+						],
+						"settings":
+						{
+							"bracket_highlighter.busy": false,
+							"bracket_highlighter.clone": -1,
+							"bracket_highlighter.clone_locations":
+							{
+								"close":
+								{
+									"1":
+									[
+										5278,
+										5279
+									]
+								},
+								"icon":
+								{
+									"1":
+									[
+										"Packages/BracketHighlighter/icons/curly_bracket.png",
+										"region.purplish"
+									]
+								},
+								"open":
+								{
+									"1":
+									[
+										5226,
+										5227
+									]
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.clone_regions":
+							[
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content"
+							],
+							"bracket_highlighter.locations":
+							{
+								"close":
+								{
+									"1":
+									[
+										5278,
+										5279
+									]
+								},
+								"icon":
+								{
+									"1":
+									[
+										"Packages/BracketHighlighter/icons/curly_bracket.png",
+										"region.purplish"
+									]
+								},
+								"open":
+								{
+									"1":
+									[
+										5226,
+										5227
+									]
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.regions":
+							[
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content"
+							],
+							"syntax": "Packages/C++/C.sublime-syntax",
+							"tab_size": 2,
+							"translate_tabs_to_spaces": true
+						},
+						"translation.x": 0.0,
+						"translation.y": 2101.0,
+						"zoom_level": 1.0
+					},
+					"stack_index": 1,
+					"type": "text"
+				},
+				{
+					"buffer": 1,
+					"file": "lock_and_fuse_bits_to_avrdude_options.perl",
+					"semi_transient": true,
+					"settings":
+					{
+						"buffer_size": 10724,
+						"regions":
+						{
+						},
+						"selection":
+						[
+							[
+								895,
+								895
+							]
+						],
+						"settings":
+						{
+							"bracket_highlighter.busy": false,
+							"bracket_highlighter.clone": -1,
+							"bracket_highlighter.clone_locations":
+							{
+								"close":
+								{
+								},
+								"icon":
+								{
+								},
+								"open":
+								{
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.clone_regions":
+							[
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content"
+							],
+							"bracket_highlighter.locations":
+							{
+								"close":
+								{
+								},
+								"icon":
+								{
+								},
+								"open":
+								{
+								},
+								"unmatched":
+								{
+								}
+							},
+							"bracket_highlighter.regions":
+							[
+								"bh_c_define",
+								"bh_c_define_center",
+								"bh_c_define_open",
+								"bh_c_define_close",
+								"bh_c_define_content",
+								"bh_square",
+								"bh_square_center",
+								"bh_square_open",
+								"bh_square_close",
+								"bh_square_content",
+								"bh_regex",
+								"bh_regex_center",
+								"bh_regex_open",
+								"bh_regex_close",
+								"bh_regex_content",
+								"bh_unmatched",
+								"bh_unmatched_center",
+								"bh_unmatched_open",
+								"bh_unmatched_close",
+								"bh_unmatched_content",
+								"bh_round",
+								"bh_round_center",
+								"bh_round_open",
+								"bh_round_close",
+								"bh_round_content",
+								"bh_default",
+								"bh_default_center",
+								"bh_default_open",
+								"bh_default_close",
+								"bh_default_content",
+								"bh_tag",
+								"bh_tag_center",
+								"bh_tag_open",
+								"bh_tag_close",
+								"bh_tag_content",
+								"bh_single_quote",
+								"bh_single_quote_center",
+								"bh_single_quote_open",
+								"bh_single_quote_close",
+								"bh_single_quote_content",
+								"bh_angle",
+								"bh_angle_center",
+								"bh_angle_open",
+								"bh_angle_close",
+								"bh_angle_content",
+								"bh_curly",
+								"bh_curly_center",
+								"bh_curly_open",
+								"bh_curly_close",
+								"bh_curly_content",
+								"bh_double_quote",
+								"bh_double_quote_center",
+								"bh_double_quote_open",
+								"bh_double_quote_close",
+								"bh_double_quote_content"
+							],
+							"syntax": "Packages/Perl/Perl.sublime-syntax",
+							"tab_size": 4,
+							"translate_tabs_to_spaces": true
+						},
+						"translation.x": 0.0,
+						"translation.y": 0.0,
+						"zoom_level": 1.0
+					},
+					"stack_index": 0,
+					"type": "text"
+				}
+			]
+		}
+	],
+	"incremental_find":
+	{
+		"height": 22.0
+	},
+	"input":
+	{
+		"height": 0.0
+	},
+	"layout":
+	{
+		"cells":
+		[
+			[
+				0,
+				0,
+				1,
+				1
+			]
+		],
+		"cols":
+		[
+			0.0,
+			1.0
+		],
+		"rows":
+		[
+			0.0,
+			1.0
+		]
+	},
+	"menu_visible": true,
+	"output.find_results":
+	{
+		"height": 0.0
+	},
+	"output.mdpopups":
+	{
+		"height": 0.0
+	},
+	"pinned_build_system": "",
+	"project": "motor.sublime-project",
+	"replace":
+	{
+		"height": 42.0
+	},
+	"save_all_on_build": true,
+	"select_file":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"mqtt.",
+				"app\\resources\\communication-MQTT\\mqtt.service.js"
+			],
+			[
+				"gernal-sett",
+				"app\\components\\general-settings\\general-settings.html"
+			],
+			[
+				"genera",
+				"app\\components\\general-settings\\general-settings.component.js"
+			],
+			[
+				"appser",
+				"www\\app\\resources\\services\\app.service.js"
+			],
+			[
+				"",
+				"www\\app\\components\\login-oauth\\login-oauth.html"
+			],
+			[
+				"push-n",
+				"www\\app\\resources\\services\\push-notifications.service.js"
+			],
+			[
+				"push-ser",
+				"www\\app\\resources\\services\\push-notifications.service.js"
+			],
+			[
+				"config.js",
+				"node_modules\\bower\\lib\\config.js"
+			],
+			[
+				"layoutc",
+				"www\\app\\layouts\\layout.controller.js"
+			],
+			[
+				"app.m",
+				"app\\app.module.js"
+			],
+			[
+				"storing-food-tablet.html",
+				"app\\modules\\wizards\\storing-food\\storing-food-tablet.html"
+			]
+		],
+		"width": 0.0
+	},
+	"select_project":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_symbol":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"selected_group": 0,
+	"settings":
+	{
+	},
+	"show_minimap": true,
+	"show_open_files": false,
+	"show_tabs": true,
+	"side_bar_visible": true,
+	"side_bar_width": 311.0,
+	"status_bar_visible": true,
+	"template_settings":
+	{
+	}
+}
